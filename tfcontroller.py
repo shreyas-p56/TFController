@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.linalg import expm
 import matplotlib.pyplot as plt
 from mpl_toolkits import mplot3d
 import warnings
@@ -121,9 +122,9 @@ class tfc:
         self.rot_mat = rot_mat
         self.omega = omega
 
-        #print(-self.rot_mat[2,0])
-        theta = np.arcsin(-self.rot_mat[2,0])
-        self.psi = np.arctan2(self.rot_mat[1,0]/np.cos(theta), self.rot_mat[0,0]/np.cos(theta))
+        self.theta = np.arcsin(-self.rot_mat[2,0])
+        self.phi = np.arcsin(self.rot_mat[2,1]/np.cos(self.theta))
+        self.psi = np.arctan2(self.rot_mat[1,0]/np.cos(self.theta), self.rot_mat[0,0]/np.cos(self.theta))
         
         bx = self.rot_mat[0,2]
         by = self.rot_mat[1,2]
@@ -138,18 +139,18 @@ class tfc:
         #position controller
         
         acc = np.dot(self.kp_pos, self.s_c - self.s) + np.dot(self.kd_pos, self.s_dot_c - self.s_dot) + self.s_ddot_c
-        #print(acc, " ")
+
         #TFC output command c
         c = (acc[2]-self.g[2])/bz
         self.c = np.array([0, 0, c])
         
-        bx_c = acc[0]/c
-        by_c = acc[1]/c
+        self.bx_c = acc[0]/c
+        self.by_c = acc[1]/c
     
         #attitude controller
         
-        bx_dot_c = (bx - bx_c)/self.t_rpx
-        by_dot_c = (by - by_c)/self.t_rpy
+        bx_dot_c = (bx - self.bx_c)/self.t_rpx
+        by_dot_c = (by - self.by_c)/self.t_rpy
         b_dot = np.array([bx_dot_c, by_dot_c])
         rot_pq = np.array([[self.rot_mat[1,0], -self.rot_mat[0,0]], [self.rot_mat[1,1], -self.rot_mat[0,1]]])
         r_world = self.kp_yaw*(self.psi_c - self.psi)
@@ -159,41 +160,58 @@ class tfc:
         
         #TFC output commands p_c, q_c, r_c
         self.omega_c = np.array([pq_c[0], pq_c[1], r_c])
-        #print(self.omega_c)
 
         self.update()
 
     def update(self):
         #updates the state of the drone
+        '''
+        self.s_dot_u = self.s_dot + self.acc*self.dt
+        self.s_u = self.s + self.s_dot_u*self.dt
+        '''
 
         omega_dot = np.array([self.kp_p*(self.omega_c[0]-self.omega[0]), self.kp_q*(self.omega_c[1]-self.omega[1]), self.kp_r*(self.omega_c[2]-self.omega[2])])
         self.omega_u = self.omega + omega_dot*self.dt
 
-        omega_hat = np.array([[0, -self.omega_u[2], self.omega_u[1]],[self.omega_u[2], 0, -self.omega_u[0]], [-self.omega_u[1], self.omega_u[0], 0]])
-        rot_mat_dot = np.dot(self.rot_mat, omega_hat)
-       
-        rot_mat_un = self.rot_mat + rot_mat_dot*self.dt    #unnormalized rot_mat
-        det_rot = np.linalg.det(rot_mat_un)                #determinant value of unnormalized rot_mat
+        '''
+        mat_t = np.array([[1, np.sin(self.phi)*np.tan(self.theta), np.cos(self.phi)*np.tan(self.theta)], [0, np.cos(self.phi), -np.sin(self.phi)], [0, np.sin(self.phi)/np.cos(self.theta), np.cos(self.phi)/np.cos(self.theta)]])
+        omega_w = np.dot(mat_t,self.omega_u)
+        
+        phi_u = self.phi + omega_w[0]*self.dt
+        theta_u =  self.theta + omega_w[1]*self.dt
+        self.psi_u = self.psi + omega_w[2]*self.dt
 
-        self.rot_mat_u = rot_mat_un/pow(det_rot,1/3)               #normalized rot_mat
-        #print(np.linalg.det(self.rot_mat_u), "\n")
+        rot_psi = np.array([[np.cos(self.psi_u), -np.sin(self.psi_u), 0], [np.sin(self.psi_u), np.cos(self.psi_u), 0], [0, 0, 1]])
+        rot_theta = np.array([[np.cos(theta_u), 0, np.sin(theta_u)], [0, 1, 0], [-np.sin(theta_u), 0, np.cos(theta_u)]])
+        rot_phi = np.array([[1, 0, 0], [0, np.cos(phi_u), -np.sin(phi_u)], [0, np.sin(phi_u), np.cos(phi_u)]])
 
-        #print(-self.rot_mat_u[2,0])
+        rot_theta_phi = np.dot(rot_theta, rot_phi)
+        self.rot_mat_u = np.dot(rot_psi, rot_theta_phi) 
+        '''
+
+        alpha = np.array([[0, -omega_dot[2], omega_dot[1]], [omega_dot[2], 0, -omega_dot[0]], [-omega_dot[1], omega_dot[0], 0]])
+        omega_dt = self.omega + 0.5*omega_dot*self.dt + np.dot(alpha,self.omega)*(self.dt**2)/12
+        omega_dt_hat = np.array([[0, -omega_dt[2], omega_dt[1]], [omega_dt[2], 0, -omega_dt[0]], [-omega_dt[1], omega_dt[0], 0]])
+
+        self.rot_mat_u = expm(omega_dt_hat*self.dt)
+
         theta_u = np.arcsin(-self.rot_mat_u[2,0])
         self.psi_u = np.arctan2(self.rot_mat_u[1,0]/np.cos(theta_u), self.rot_mat_u[0,0]/np.cos(theta_u))
 
-        acc = self.g + np.dot(self.rot_mat, self.c)
-        #print(acc,"\n")
+        self.bx_err = self.bx_c - self.rot_mat_u[0,2]
+        self.by_err = self.by_c - self.rot_mat_u[1,2]
+
+        acc = self.g + np.dot(self.rot_mat_u, self.c)
         self.s_dot_u = self.s_dot + acc*self.dt
-        self.s_u = self.s + self.s_dot_u*self.dt
+        self.s_u = self.s + 0.5*(self.s_dot + self.s_dot_u)*self.dt
 
 
 if __name__ == "__main__":
     
     #periodic-trajectory generation parameters
-    A = [0, 1, 0]
-    f = [0, 2*np.pi, 0]
-    delta = [0, 0, 0]
+    A = [0, 2, 0]
+    f = [0, np.pi, 0]
+    delta = [0, np.pi/2, 0]
     d = np.array([0, 0, 0])
 
     Ptg = ptg(A, f, delta, d)
@@ -202,7 +220,6 @@ if __name__ == "__main__":
     y_des = Ptg.y_path
     z_des = Ptg.z_path
     psi_des = Ptg.psi_path
-    #print(psi_des)
 
     x_dot_des = Ptg.x_dot_path
     y_dot_des = Ptg.y_dot_path
@@ -216,13 +233,13 @@ if __name__ == "__main__":
     iter = len(x_des)
     
     #trajectory-following controller parameters
-    kp_pos = np.diag(np.array([150,150,150]))
-    kd_pos = np.diag(np.array([18,18,18]))
-    t_rpx = 0.1
-    t_rpy = 0.1
-    kp_yaw = 10
-    kp_p = 10
-    kp_q = 1
+    kp_pos = np.diag(np.array([225,225,225]))
+    kd_pos = np.diag(np.array([30,30,30]))
+    t_rpx = 10
+    t_rpy = 10
+    kp_yaw = 0.1
+    kp_p = 0.02
+    kp_q = 0.02
     kp_r = 0.1
 
     Tfc = tfc(kp_pos, kd_pos, t_rpx, t_rpy, kp_yaw, kp_p, kp_q, kp_r, dt)
@@ -232,7 +249,9 @@ if __name__ == "__main__":
     z_path = [0]
     psi_path = [0]
 
-    x_err = [x_des[0]-x_path[-1]]
+    #r_err = [((x_des[0]-x_path[0])**2 + (y_des[0]-y_path[0])**2 + (z_des[0]-z_path[0])**2)**0.5]
+    bx_err = [0]
+    by_err = [0]
     time = [0]
 
     s_dot = np.array([0, 0, 0])
@@ -255,13 +274,14 @@ if __name__ == "__main__":
         z_path.append(s[2])
         psi_path.append(Tfc.psi_u)
 
-        x_err.append(x_des[i]-s[0])
+        #r_err.append(((x_des[i]-s[0])**2 + (y_des[i]-s[1])**2 + (z_des[i]-s[2])**2)**0.5)
+        bx_err.append(Tfc.bx_err)
+        by_err.append(Tfc.by_err)
         time.append(time[-1]+dt)
 
         s_dot = Tfc.s_dot_u
         omega = Tfc.omega_u
         rot_mat = Tfc.rot_mat_u
-        print(rot_mat, "\n")
     
     #trajectory plotting
     
@@ -271,17 +291,15 @@ if __name__ == "__main__":
     ax.plot3D(x_path, y_path, z_path, linestyle = '-', color = 'blue')
 
     ax.set_title('Flight path').set_fontsize(20)
-    ax.set_xlabel('$x$ [$m$]').set_fontsize(20)
-    ax.set_ylabel('$y$ [$m$]').set_fontsize(20)
-    ax.set_zlabel('$z$ [$m$]').set_fontsize(20)
+    ax.set_xlabel('$x$').set_fontsize(20)
+    ax.set_ylabel('$y$').set_fontsize(20)
+    ax.set_zlabel('$z$').set_fontsize(20)
     plt.legend(['Planned path','Executed path'], fontsize = 14)
 
-    #ax.set_xlim(-1, 1)
-    #ax.set_ylim(-1, 1)
-    #ax.set_zlim(-1, 1)
-
     plt.show()
-    
 
-    plt.plot(time, x_err)
+    plt.plot(time, bx_err)
+    plt.show()
+
+    plt.plot(time, by_err)
     plt.show()
