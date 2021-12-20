@@ -21,7 +21,7 @@ class ptg:
         delta = self.delta
         d = self.d
         
-        s_c = d + np.array([A[0]*np.cos(f[0]*t + delta[0]), A[1]*np.cos(f[1]*t + delta[1]), A[2]*np.cos(f[2]*t + delta[2])])
+        s_c = d + np.array([A[0]*np.cos(f[0]*t + delta[0]), A[1]*np.cos(f[1]*t + delta[1]), A[2]*np.cos(f[2]*t + delta[2])]).transpose()
         return s_c
     
     def vel_c(self,t):
@@ -41,9 +41,10 @@ class ptg:
         return s_ddot_c
 
     def psi_c(self,t):
-        vel_v = self.vel_c(t)
-        return np.arctan2(vel_v[1],vel_v[0])
-    
+        #vel_v = self.vel_c(t)
+        #return np.arctan2(vel_v[1],vel_v[0])
+        return 0
+
     def trajectory(self):
         total_time = 20.0
         dt = 0.01
@@ -103,7 +104,7 @@ class tfc:
 
     def __init__(self, kp_pos, kd_pos, t_rpx, t_rpy, kp_yaw, kp_p, kp_q, kp_r, dt):
         
-        self.g = np.array([0, 0, -9.8])
+        self.g = np.array([0, 0, -9.8]).transpose()
         
         self.kp_pos = kp_pos
         self.kd_pos = kd_pos
@@ -117,10 +118,10 @@ class tfc:
         
     def controller(self, s, s_dot, s_c, s_dot_c, s_ddot_c, psi_c, omega, rot_mat):
 
-        self.s = s
-        self.s_dot = s_dot
-        self.rot_mat = rot_mat
-        self.omega = omega
+        self.s = np.copy(s)
+        self.s_dot = np.copy(s_dot)
+        self.rot_mat = np.copy(rot_mat)
+        self.omega = np.copy(omega)
 
         self.theta = np.arcsin(-self.rot_mat[2,0])
         self.phi = np.arcsin(self.rot_mat[2,1]/np.cos(self.theta))
@@ -131,35 +132,43 @@ class tfc:
         bz = self.rot_mat[2,2]
 
         #'_c' indicates 'commanded', we get it from the trajectory generator
-        self.s_c = s_c
-        self.s_dot_c = s_dot_c
-        self.s_ddot_c = s_ddot_c
+        self.s_c = np.copy(s_c)
+        self.s_dot_c = np.copy(s_dot_c)
+        self.s_ddot_c = np.copy(s_ddot_c)
         self.psi_c = psi_c
         
         #position controller
         
-        acc = np.dot(self.kp_pos, self.s_c - self.s) + np.dot(self.kd_pos, self.s_dot_c - self.s_dot) + self.s_ddot_c
+        self.acc = np.dot(self.kp_pos, self.s_c - self.s) + np.dot(self.kd_pos, self.s_dot_c - self.s_dot) + self.s_ddot_c
 
         #TFC output command c
-        c = (acc[2]-self.g[2])/bz
-        self.c = np.array([0, 0, c])
+        c = (self.acc[2]-self.g[2])/bz
+        self.c = np.array([0, 0, c]).transpose()
         
-        self.bx_c = acc[0]/c
-        self.by_c = acc[1]/c
+        self.bx_c = self.acc[0]/c
+        self.by_c = self.acc[1]/c
     
         #attitude controller
         
-        bx_dot_c = (bx - self.bx_c)/self.t_rpx
-        by_dot_c = (by - self.by_c)/self.t_rpy
-        b_dot = np.array([bx_dot_c, by_dot_c])
+        bx_dot_c = -(bx - self.bx_c)/self.t_rpx
+        by_dot_c = -(by - self.by_c)/self.t_rpy
+        #print("For x:", bx_dot_c, s_dot_c[0], self.theta, s_dot[0])
+        #print("For y:", by_dot_c, s_dot_c[1], self.phi, s_dot[1])
+        b_dot = np.array([bx_dot_c, by_dot_c]).transpose()
         rot_pq = np.array([[self.rot_mat[1,0], -self.rot_mat[0,0]], [self.rot_mat[1,1], -self.rot_mat[0,1]]])
-        r_world = self.kp_yaw*(self.psi_c - self.psi)
+        
+        if (self.psi_c - self.psi > np.pi):
+            r_world = self.kp_yaw*(self.psi_c - self.psi -2*np.pi)
+        elif (self.psi_c - self.psi < -np.pi):
+            r_world = self.kp_yaw*(self.psi_c - self.psi + 2*np.pi)
+        else:
+            r_world = self.kp_yaw*(self.psi_c - self.psi)
 
         pq_c = (np.dot(rot_pq, b_dot))/bz
         r_c = bz*r_world
-        
+        #print(bz)
         #TFC output commands p_c, q_c, r_c
-        self.omega_c = np.array([pq_c[0], pq_c[1], r_c])
+        self.omega_c = np.array([pq_c[0], pq_c[1], r_c]).transpose()
 
         self.update()
 
@@ -170,49 +179,90 @@ class tfc:
         self.s_u = self.s + self.s_dot_u*self.dt
         '''
 
-        omega_dot = np.array([self.kp_p*(self.omega_c[0]-self.omega[0]), self.kp_q*(self.omega_c[1]-self.omega[1]), self.kp_r*(self.omega_c[2]-self.omega[2])])
-        self.omega_u = self.omega + omega_dot*self.dt
+        psi = self.psi
+        rot_mat = np.copy(self.rot_mat)
+        omega = np.copy(self.omega)
 
-        '''
-        mat_t = np.array([[1, np.sin(self.phi)*np.tan(self.theta), np.cos(self.phi)*np.tan(self.theta)], [0, np.cos(self.phi), -np.sin(self.phi)], [0, np.sin(self.phi)/np.cos(self.theta), np.cos(self.phi)/np.cos(self.theta)]])
-        omega_w = np.dot(mat_t,self.omega_u)
+        z_dot = self.s_dot[2] + self.acc[2]*self.dt
+
+        for i in range(5):
+
+            omega_dot = np.array([self.kp_p*(self.omega_c[0]-omega[0]), self.kp_q*(self.omega_c[1]-omega[1]), self.kp_r*(self.omega_c[2]-omega[2])]).transpose()
+            omega = omega + omega_dot*self.dt/5
+            #print(self.omega_c)
         
-        phi_u = self.phi + omega_w[0]*self.dt
-        theta_u =  self.theta + omega_w[1]*self.dt
-        self.psi_u = self.psi + omega_w[2]*self.dt
+            theta = np.arcsin(-rot_mat[2,0])
+            phi = np.arcsin(rot_mat[2,1]/np.cos(theta))
+            psi = np.arctan2(rot_mat[1,0]/np.cos(theta), rot_mat[0,0]/np.cos(theta))
 
-        rot_psi = np.array([[np.cos(self.psi_u), -np.sin(self.psi_u), 0], [np.sin(self.psi_u), np.cos(self.psi_u), 0], [0, 0, 1]])
-        rot_theta = np.array([[np.cos(theta_u), 0, np.sin(theta_u)], [0, 1, 0], [-np.sin(theta_u), 0, np.cos(theta_u)]])
-        rot_phi = np.array([[1, 0, 0], [0, np.cos(phi_u), -np.sin(phi_u)], [0, np.sin(phi_u), np.cos(phi_u)]])
+            mat_t = np.array([[1, np.sin(phi)*np.tan(theta), np.cos(phi)*np.tan(theta)], [0, np.cos(phi), -np.sin(phi)], [0, np.sin(phi)/np.cos(theta), np.cos(phi)/np.cos(theta)]])
+            omega_w = np.dot(mat_t,omega)
+            #print(omega_w)
+            #print(mat_t)
 
-        rot_theta_phi = np.dot(rot_theta, rot_phi)
-        self.rot_mat_u = np.dot(rot_psi, rot_theta_phi) 
-        '''
+            
+            if (phi + omega_w[0]*self.dt/5 < 0):
+               phi = max(-1.55, phi + omega_w[0]*self.dt/5)
+            else:
+               phi = min(1.55, phi + omega_w[0]*self.dt/5)
+        
+            if (theta + omega_w[1]*self.dt/5 < 0):
+                theta = max(-1.55, theta + omega_w[1]*self.dt/5)
+            else:
+                theta = min(1.55, theta + omega_w[1]*self.dt/5)
+            
 
-        alpha = np.array([[0, -omega_dot[2], omega_dot[1]], [omega_dot[2], 0, -omega_dot[0]], [-omega_dot[1], omega_dot[0], 0]])
-        omega_dt = self.omega + 0.5*omega_dot*self.dt + np.dot(alpha,self.omega)*(self.dt**2)/12
-        omega_dt_hat = np.array([[0, -omega_dt[2], omega_dt[1]], [omega_dt[2], 0, -omega_dt[0]], [-omega_dt[1], omega_dt[0], 0]])
+            #phi += omega_w[0]*self.dt/5
+            #theta += omega_w[1]*self.dt/5
+            psi += omega_w[2]*self.dt/5
+        
+            while (psi < -np.pi):
+                psi += 2*np.pi
+        
+            while (psi >= np.pi):
+                psi -= 2*np.pi
 
-        self.rot_mat_u = expm(omega_dt_hat*self.dt)
+            #print("\t",[phi, theta, psi])
 
-        theta_u = np.arcsin(-self.rot_mat_u[2,0])
-        self.psi_u = np.arctan2(self.rot_mat_u[1,0]/np.cos(theta_u), self.rot_mat_u[0,0]/np.cos(theta_u))
+            rot_psi = np.array([[np.cos(psi), -np.sin(psi), 0], [np.sin(psi), np.cos(psi), 0], [0, 0, 1]])
+            rot_theta = np.array([[np.cos(theta), 0, np.sin(theta)], [0, 1, 0], [-np.sin(theta), 0, np.cos(theta)]])
+            rot_phi = np.array([[1, 0, 0], [0, np.cos(phi), -np.sin(phi)], [0, np.sin(phi), np.cos(phi)]])
+
+            rot_theta_phi = np.dot(rot_theta, rot_phi)
+            rot_mat = np.dot(rot_psi, rot_theta_phi) 
+        
+            '''
+            alpha = np.array([[0, -omega_dot[2], omega_dot[1]], [omega_dot[2], 0, -omega_dot[0]], [-omega_dot[1], omega_dot[0], 0]])
+            omega_dt = self.omega + 0.5*omega_dot*self.dt + np.dot(alpha,self.omega)*(self.dt**2)/12
+            omega_dt_hat = np.array([[0, -omega_dt[2], omega_dt[1]], [omega_dt[2], 0, -omega_dt[0]], [-omega_dt[1], omega_dt[0], 0]])
+
+            self.rot_mat_u = expm(omega_dt_hat*self.dt)
+
+            theta_u = np.arcsin(-self.rot_mat_u[2,0])
+            self.psi_u = np.arctan2(self.rot_mat_u[1,0]/np.cos(theta_u), self.rot_mat_u[0,0]/np.cos(theta_u))
+            '''
+
+        #print("\n")
+
+        self.psi_u = psi
+        self.omega_u = np.copy(omega)
+        self.rot_mat_u = np.copy(rot_mat)
 
         self.bx_err = self.bx_c - self.rot_mat_u[0,2]
         self.by_err = self.by_c - self.rot_mat_u[1,2]
 
         acc = self.g + np.dot(self.rot_mat_u, self.c)
-        self.s_dot_u = self.s_dot + acc*self.dt
+        self.s_dot_u = np.array([self.s_dot[0] + acc[0]*self.dt, self.s_dot[1] + acc[1]*self.dt, z_dot]).transpose()
         self.s_u = self.s + 0.5*(self.s_dot + self.s_dot_u)*self.dt
 
 
 if __name__ == "__main__":
     
     #periodic-trajectory generation parameters
-    A = [0, 2, 0]
-    f = [0, np.pi, 0]
-    delta = [0, np.pi/2, 0]
-    d = np.array([0, 0, 0])
+    A = [0, 1, 1]
+    f = [0, np.pi/2, np.pi]
+    delta = [0, 0, np.pi/2]
+    d = np.array([0, 0, 0]).transpose()
 
     Ptg = ptg(A, f, delta, d)
     
@@ -233,14 +283,14 @@ if __name__ == "__main__":
     iter = len(x_des)
     
     #trajectory-following controller parameters
-    kp_pos = np.diag(np.array([225,225,225]))
-    kd_pos = np.diag(np.array([30,30,30]))
-    t_rpx = 10
-    t_rpy = 10
-    kp_yaw = 0.1
-    kp_p = 0.02
-    kp_q = 0.02
-    kp_r = 0.1
+    kp_pos = np.diag(np.array([144,144,169]))
+    kd_pos = np.diag(np.array([24,24,26]))
+    t_rpx = 0.1
+    t_rpy = 0.1
+    kp_yaw = 100
+    kp_p = 80
+    kp_q = 80
+    kp_r = 103
 
     Tfc = tfc(kp_pos, kd_pos, t_rpx, t_rpy, kp_yaw, kp_p, kp_q, kp_r, dt)
 
@@ -252,23 +302,29 @@ if __name__ == "__main__":
     #r_err = [((x_des[0]-x_path[0])**2 + (y_des[0]-y_path[0])**2 + (z_des[0]-z_path[0])**2)**0.5]
     bx_err = [0]
     by_err = [0]
+    psi_err = [0]
+
+    #x_err = [0]
+    #y_err = [0]
+    #z_err = [0]
+
     time = [0]
 
-    s_dot = np.array([0, 0, 0])
-    omega = np.array([0, 0, 0])
+    s_dot = np.array([0, 0, 0]).transpose()
+    omega = np.array([0, 0, 0]).transpose()
     rot_mat = np.identity(3)
 
     for i in range(iter):
-        s = np.array([x_path[-1], y_path[-1], z_path[-1]])
+        s = np.array([x_path[-1], y_path[-1], z_path[-1]]).transpose()
         
         psi_c = psi_des[i]
-        s_c = np.array([x_des[i], y_des[i], z_des[i]])
-        s_dot_c = np.array([x_dot_des[i], y_dot_des[i], z_dot_des[i]])
-        s_ddot_c = np.array([x_ddot_des[i], y_ddot_des[i], z_ddot_des[i]])
+        s_c = np.array([x_des[i], y_des[i], z_des[i]]).transpose()
+        s_dot_c = np.array([x_dot_des[i], y_dot_des[i], z_dot_des[i]]).transpose()
+        s_ddot_c = np.array([x_ddot_des[i], y_ddot_des[i], z_ddot_des[i]]).transpose()
 
         Tfc.controller(s, s_dot, s_c, s_dot_c, s_ddot_c, psi_c, omega, rot_mat)
         
-        s = Tfc.s_u
+        s = np.copy(Tfc.s_u)
         x_path.append(s[0])
         y_path.append(s[1])
         z_path.append(s[2])
@@ -277,11 +333,17 @@ if __name__ == "__main__":
         #r_err.append(((x_des[i]-s[0])**2 + (y_des[i]-s[1])**2 + (z_des[i]-s[2])**2)**0.5)
         bx_err.append(Tfc.bx_err)
         by_err.append(Tfc.by_err)
+        psi_err.append(psi_c-psi_path[-1])
+        
+        #x_err.append(x_des[i]-x_path[-1])
+        #y_err.append(y_des[i]-y_path[-1])
+        #z_err.append(z_des[i]-z_path[-1])
+        
         time.append(time[-1]+dt)
 
-        s_dot = Tfc.s_dot_u
-        omega = Tfc.omega_u
-        rot_mat = Tfc.rot_mat_u
+        s_dot = np.copy(Tfc.s_dot_u)
+        omega = np.copy(Tfc.omega_u)
+        rot_mat = np.copy(Tfc.rot_mat_u)
     
     #trajectory plotting
     
@@ -298,8 +360,26 @@ if __name__ == "__main__":
 
     plt.show()
 
-    plt.plot(time, bx_err)
+    plt.plot(time, bx_err, c='r')
+    plt.plot(time, by_err, '--b')
+    plt.legend(["bx_err","by_err"])
     plt.show()
 
-    plt.plot(time, by_err)
+    plt.plot(time[1:], x_des, c='r', linewidth=3.0)
+    plt.plot(time, x_path, '--b')
+    plt.legend(["x_des","x_path"])
     plt.show()
+    #plt.plot(time[1:], y_des)
+
+    plt.plot(time[1:], y_des, c='r', linewidth=3.0)
+    plt.plot(time, y_path, '--b')
+    plt.legend(["y_des","y_path"])
+    plt.show()
+
+    plt.plot(time[1:], z_des, c='r', linewidth=3.0)
+    plt.plot(time, z_path, '--b')
+    plt.legend(["z_des","z_path"])
+    plt.show()
+
+    #plt.plot(time, psi_err)
+    #plt.show()
